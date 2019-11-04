@@ -30,6 +30,7 @@ OTHER DEALINGS IN THE SOFTWARE.
 
 const randomBytes = require('randombytes')
 const { EventEmitter } = require('events')
+const mh = require('multihashes')
 
 /**
  * @param  {Uint8Array} array1
@@ -191,6 +192,54 @@ class KBucket extends EventEmitter {
     return this.add(contact)
   }
 
+  //TODO MODIFY FOR PARTIAL LOOKUP
+
+
+
+  /**
+   * Get the n closest contacts to the provided the partial node id. "Closest" here means:
+   * closest according to the XOR metric of the contact node id.
+   *
+   * @param  {Uint8Array} id  Contact node id partial, not full id
+   * @param  {Number=} n      Integer (Default: Infinity) The maximum number of
+   *                          closest contacts to return
+   * @return {Array}          Array Maximum of n closest contacts to the node id
+   */
+  closestPartial (id, n = Infinity) {
+    ensureInt8('id', id)
+
+    if ((!Number.isInteger(n) && n !== Infinity) || n <= 0) {
+      throw new TypeError('n is not positive number')
+    }
+
+    if(id.length < this.localNodeId.length){
+      console.log('The supplied id length is less than the node id')
+      console.log(id.length)
+      console.log(this.localNodeId.length)
+    }
+
+    let contacts = []
+
+    for (let nodes = [ this.root ], bitIndex = 0; nodes.length > 0 && contacts.length < n;) {
+      const node = nodes.pop()
+      if (node.contacts === null) {
+
+        const detNode = this._determineNodePartial(node, id, bitIndex++)
+
+        nodes.push(node.left === detNode ? node.right : node.left)
+        nodes.push(detNode)
+      } else {
+        contacts = contacts.concat(node.contacts)
+      }
+    }
+
+    return contacts
+      .map(a => [this.distance(a.id, id), a])
+      .sort((a, b) => a[0] - b[0])
+      .slice(0, n)
+      .map(a => a[1])
+  }
+
   /**
    * Get the n closest contacts to the provided node id. "Closest" here means:
    * closest according to the XOR metric of the contact node id.
@@ -207,6 +256,13 @@ class KBucket extends EventEmitter {
       throw new TypeError('n is not positive number')
     }
 
+        //console.log("Looking closest node of %s contacts to the key %s", mh.toB58String(this.localNodeId),mh.toB58String(id))
+
+        if(id.length < this.localNodeId.length){
+          console.log('The supplied id length is less than the node id')
+          console.log(id.length)
+          console.log(this.localNodeId.length)
+        }
     let contacts = []
 
     for (let nodes = [ this.root ], bitIndex = 0; nodes.length > 0 && contacts.length < n;) {
@@ -243,6 +299,71 @@ class KBucket extends EventEmitter {
     return count
   }
 
+
+    /**
+   * Determines whether the id at the bitIndex is 0 or 1.
+   * Return left leaf if `id` at `bitIndex` is 0, right leaf otherwise
+   *
+   * @param  {Object} node     internal object that has 2 leafs: left and right
+   * @param  {Uint8Array} id   Id to compare localNodeId with.
+   * @param  {Number} bitIndex Integer (Default: 0) The bit index to which bit
+   *                           to check in the id Uint8Array.
+   * @return {Object}          left leaf if id at bitIndex is 0, right leaf otherwise.
+   */
+  _determineNodePartial (node, id, bitIndex) {
+    // **NOTE** remember that id is a Uint8Array and has granularity of
+    // bytes (8 bits), whereas the bitIndex is the _bit_ index (not byte)
+
+    // id's that are too short are put in low bucket (1 byte = 8 bits)
+    // (bitIndex >> 3) finds how many bytes the bitIndex describes
+    // bitIndex % 8 checks if we have extra bits beyond byte multiples
+    // if number of bytes is <= no. of bytes described by bitIndex and there
+    // are extra bits to consider, this means id has less bits than what
+    // bitIndex describes, id therefore is too short, and will be put in low
+    // bucket
+    const bytesDescribedByBitIndex = bitIndex >> 3
+    const bitIndexWithinByte = bitIndex % 8
+
+    //Crear un determinePartialNode() donde en caso de id pequeño, se haga left right legt right
+    //en vez de solo left(0)
+    if ((id.length <= bytesDescribedByBitIndex) && (bitIndexWithinByte !== 0)) {
+
+      let randomNum = randomBytes(1).readUInt8() //1 byte random
+      console.log("Random value selected %s", randomNum)
+      //00000000 (0) first Low (left node)
+      //00010000 (127) last low (128 numbers for low)
+      //00010001 (128) first high (right node)
+      //11111111 (255) last High (128 numbers for high)
+
+      //OTRA OPCION ES TOMAR k/2 de los mas cercanos de la derecha y k/2 de los mas cercanos de la izquierda
+      //PROBAR CON ESTE ALGORITMO TAMBIEN
+      //Ya que seguir bajando no tiene sentido pues de aca en mas tenemos que ir a las hojas
+      if(randomNum>127){
+        console.log("Went right")
+        return node.right
+      }
+      else{
+        console.log("Went left")
+        return node.left
+      }
+    }
+
+    const byteUnderConsideration = id[bytesDescribedByBitIndex]
+
+    // byteUnderConsideration is an integer from 0 to 255 represented by 8 bits
+    // where 255 is 11111111 and 0 is 00000000
+    // in order to find out whether the bit at bitIndexWithinByte is set
+    // we construct (1 << (7 - bitIndexWithinByte)) which will consist
+    // of all bits being 0, with only one bit set to 1
+    // for example, if bitIndexWithinByte is 3, we will construct 00010000 by
+    // (1 << (7 - 3)) -> (1 << 4) -> 16
+    if (byteUnderConsideration & (1 << (7 - bitIndexWithinByte))) {
+      return node.right
+    }
+
+    return node.left
+  }
+
   /**
    * Determines whether the id at the bitIndex is 0 or 1.
    * Return left leaf if `id` at `bitIndex` is 0, right leaf otherwise
@@ -266,6 +387,9 @@ class KBucket extends EventEmitter {
     // bucket
     const bytesDescribedByBitIndex = bitIndex >> 3
     const bitIndexWithinByte = bitIndex % 8
+
+       //Crear un determinePartialNode() donde en caso de id pequeño, se haga left right legt right
+    //en vez de solo left(0)
     if ((id.length <= bytesDescribedByBitIndex) && (bitIndexWithinByte !== 0)) {
       return node.left
     }
